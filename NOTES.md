@@ -1,5 +1,7 @@
 # Steel Browser Orchestrator — Design Notes
 
+> *Written with a little help from Claude Sonnet 4.6. The thinking, decisions, and trade-offs are mine — it just helped me write them down*
+
 ## Assumptions
 
 Several design questions were sent to the challenge authors without response. The following assumptions were made to proceed:
