@@ -56,14 +56,14 @@ func (p *Pool) Release(w *Worker) {
 // Acquire blocks until a worker is available or the context is canceled.
 // This is the queuing mechanism — callers wait in line.
 func (p *Pool) Acquire(ctx context.Context) (*Worker, error) {
-	select {
-	case w := <-p.available:
-		log.Printf("[pool] worker %d acquired from pool", w.ID)
-		return w, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("timed out waiting for available worker: %w", ctx.Err())
+		select {
+		case w := <-p.available:
+			log.Printf("[pool] worker %d acquired from pool", w.ID)
+			return w, nil
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timed out waiting for available worker: %w", ctx.Err())
+		}
 	}
-}
 
 // FindBySession returns the worker that holds the given session ID.
 func (p *Pool) FindBySession(sessionID string) (*Worker, bool) {
