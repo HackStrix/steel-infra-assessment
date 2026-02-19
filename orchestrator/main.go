@@ -30,7 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create worker pool: %v", err)
 	}
-	
+
 	// create session manager
 	sessions, err := NewSessionManager()
 	if err != nil {
@@ -103,7 +103,10 @@ func main() {
 	}
 }
 
+const maxCreateRetries = 2
+
 // handleCreateSession handles POST /sessions
+// Retries with a new worker if the first one fails (EOF, crash, etc.)
 func handleCreateSession(w http.ResponseWriter, r *http.Request, pool *Pool, sessions *SessionManager) {
 	// Read request body
 	body, err := io.ReadAll(r.Body)
@@ -113,57 +116,68 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, pool *Pool, ses
 	}
 	defer r.Body.Close()
 
-	// Wait for an available worker (blocks until one is free, up to 30s)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	worker, err := pool.Acquire(ctx)
-	if err != nil {
-		http.Error(w, "no workers available (queue timeout)", http.StatusServiceUnavailable)
+	var lastErr error
+	for attempt := 0; attempt < maxCreateRetries; attempt++ {
+		worker, err := pool.Acquire(ctx)
+		if err != nil {
+			http.Error(w, "no workers available (queue timeout)", http.StatusServiceUnavailable)
+			return
+		}
+
+		respBody, statusCode, err := forwardCreateSession(worker, body)
+		if err != nil {
+			log.Printf("[handler] create attempt %d/%d failed on worker %d: %v", attempt+1, maxCreateRetries, worker.ID, err)
+			lastErr = err
+			worker.Kill() // force restart — monitor goroutine handles recovery
+			continue
+		}
+
+		// Parse response to extract session ID
+		var sessionResp struct {
+			ID        string          `json:"id"`
+			CreatedAt json.RawMessage `json:"created_at"`
+			Data      json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(respBody, &sessionResp); err != nil {
+			log.Printf("[handler] create attempt %d/%d: bad response from worker %d: %s", attempt+1, maxCreateRetries, worker.ID, string(respBody))
+			lastErr = fmt.Errorf("failed to parse worker response")
+			worker.Kill()
+			continue
+		}
+
+		// Success — register the session and return
+		sessions.Add(sessionResp.ID, worker)
+		worker.SetSessionID(sessionResp.ID)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		w.Write(respBody)
 		return
 	}
 
-	// Forward to the worker
-	respBody, statusCode, err := forwardCreateSession(worker, body)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("worker error: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	// Parse response to extract session ID
-	var sessionResp struct {
-		ID        string          `json:"id"`
-		CreatedAt json.RawMessage `json:"created_at"`
-		Data      json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(respBody, &sessionResp); err != nil {
-		http.Error(w, "failed to parse worker response", http.StatusInternalServerError)
-		return
-	}
-
-	// Register the session mapping
-	sessions.Add(sessionResp.ID, worker)
-	worker.SetSessionID(sessionResp.ID)
-
-	// Return the response to the client
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	w.Write(respBody)
+	// All retries exhausted
+	http.Error(w, fmt.Sprintf("all workers failed: %v", lastErr), http.StatusBadGateway)
 }
 
 // handleGetSession handles GET /sessions/:id
+// If the worker holding the session is dead, cleans up the stale mapping and returns 404.
 func handleGetSession(w http.ResponseWriter, r *http.Request, sessions *SessionManager, sessionID string) {
-	// Look up which worker holds this session
 	worker := sessions.Get(sessionID)
 	if worker == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 
-	// Forward to the worker
 	respBody, statusCode, err := forwardGetSession(worker, sessionID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("worker error: %v", err), http.StatusBadGateway)
+		// Worker is dead — session is lost. Clean up the stale mapping.
+		log.Printf("[handler] GET forward failed, session %s lost (worker %d dead): %v", sessionID, worker.ID, err)
+		sessions.Remove(sessionID)
+		worker.Kill()
+		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 

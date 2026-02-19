@@ -35,18 +35,18 @@ impl TestRunner {
         let mut passed = 0usize;
         let mut total = 0usize;
 
-        for (group_name, tests) in &self.groups {
-            println!("\n  {} {}", "▸".dimmed(), group_name.bold());
+        println!();
 
+        for (_group_name, tests) in &self.groups {
             for test in tests {
                 total += 1;
                 match (test.func)(client).await {
                     Ok(()) => {
                         passed += 1;
-                        println!("    {} {}", "✓".green(), test.name);
+                        println!("{} {}", "✓".green(), test.name);
                     }
                     Err(e) => {
-                        println!("    {} {}: {}", "✗".red(), test.name.red(), e);
+                        println!("{} {}: {}", "✗".red(), test.name.red(), e);
                     }
                 }
             }
