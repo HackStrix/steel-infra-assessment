@@ -52,6 +52,10 @@ type Worker struct {
 	// OnCrash is called when the worker crashes with an active session.
 	// The callback receives the session ID so the session manager can clean up.
 	OnCrash func(sessionID string)
+
+	// draining indicates this worker should not be restarted after it exits.
+	// Set by the pool during scale-down or graceful shutdown.
+	draining bool
 }
 
 // NewWorker creates a new worker instance (does not start it).
@@ -71,7 +75,7 @@ func (w *Worker) Start() error {
 	defer w.mu.Unlock()
 
 	if w.state != WorkerStateDead && w.state != WorkerStateUnhealthy {
-		return fmt.Errorf("worker %d already running (state=%s)", w.ID, w.state)
+		return fmt.Errorf(":%-5d already running (state=%s)", w.Port, w.state)
 	}
 
 	cmd := exec.Command(w.BinaryPath)
@@ -80,14 +84,14 @@ func (w *Worker) Start() error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start worker %d: %w", w.ID, err)
+		return fmt.Errorf("failed to start :%-5d: %w", w.Port, err)
 	}
 
 	w.cmd = cmd
 	w.state = WorkerStateStarting
 	w.sessionID = ""
 
-	log.Printf("[worker %d] started on port %d (pid=%d)", w.ID, w.Port, cmd.Process.Pid)
+	log.Printf("[worker :%-5d] starting (pid=%d)", w.Port, cmd.Process.Pid)
 
 	// Monitor for process exit in background
 	go w.monitor()
@@ -109,18 +113,27 @@ func (w *Worker) monitor() {
 	w.mu.Unlock()
 
 	if prevSession != "" {
-		log.Printf("[worker %d] crashed with active session %s", w.ID, prevSession)
+		log.Printf("[worker :%-5d] crashed with active session %s", w.Port, prevSession)
 		// Notify session manager to clean up the stale mapping
 		if w.OnCrash != nil {
 			w.OnCrash(prevSession)
 		}
 	}
-	log.Printf("[worker %d] process exited: %v — restarting in 1s", w.ID, err)
+	w.mu.Lock()
+	isDraining := w.draining
+	w.mu.Unlock()
+
+	if isDraining {
+		log.Printf("[worker :%-5d] draining — not restarting", w.Port)
+		return
+	}
+
+	log.Printf("[worker :%-5d] process exited: %v — restarting in 1s", w.Port, err)
 
 	time.Sleep(1 * time.Second)
 
 	if err := w.Start(); err != nil {
-		log.Printf("[worker %d] failed to restart: %v", w.ID, err)
+		log.Printf("[worker :%-5d] failed to restart: %v", w.Port, err)
 	}
 }
 
@@ -137,7 +150,7 @@ func (w *Worker) waitForReady() {
 			w.mu.Lock()
 			if w.state == WorkerStateStarting {
 				w.state = WorkerStateAvailable
-				log.Printf("[worker %d] ready", w.ID)
+				log.Printf("[worker :%-5d] ready", w.Port)
 			}
 			w.mu.Unlock()
 			// Push to the pool's available channel so queued requests can proceed
@@ -152,7 +165,7 @@ func (w *Worker) waitForReady() {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	log.Printf("[worker %d] failed to become ready after 6s", w.ID)
+	log.Printf("[worker :%-5d] failed to become ready after 6s", w.Port)
 	w.mu.Lock()
 	w.state = WorkerStateUnhealthy
 	w.mu.Unlock()
@@ -177,9 +190,17 @@ func (w *Worker) Kill() {
 	defer w.mu.Unlock()
 
 	if w.cmd != nil && w.cmd.Process != nil {
-		log.Printf("[worker %d] killing process (pid=%d)", w.ID, w.cmd.Process.Pid)
+		log.Printf("[worker :%-5d] killing (pid=%d)", w.Port, w.cmd.Process.Pid)
 		_ = w.cmd.Process.Kill()
 	}
+}
+
+// Drain marks the worker so that monitor() will not restart it after exit.
+// Used by the pool during scale-down or graceful shutdown.
+func (w *Worker) Drain() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.draining = true
 }
 
 // State returns the current worker state (thread-safe).

@@ -20,7 +20,7 @@ impl OrchestratorClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: Client::builder()
-                .timeout(std::time::Duration::from_secs(35))
+                .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -94,6 +94,26 @@ impl OrchestratorClient {
         resp.text()
             .await
             .map_err(|e| format!("failed to read health response: {e}"))
+    }
+
+    /// POST /debug/crash-worker?session_id=:id — kills the worker holding the session (testing only).
+    pub async fn crash_worker(&self, session_id: &str) -> Result<(), String> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/debug/crash-worker?session_id={}",
+                self.base_url, session_id
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("POST /debug/crash-worker request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("crash-worker returned {status}: {body}"));
+        }
+        Ok(())
     }
 
     /// Returns the base URL for building custom requests.

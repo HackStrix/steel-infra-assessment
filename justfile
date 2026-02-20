@@ -11,13 +11,13 @@ default:
 build:
     cd orchestrator && go build -o ../steel-orchestrator .
 
-# Run the orchestrator (default: 3 workers)
-run workers="10": build
-    ./steel-orchestrator -workers={{workers}} -binary=./steel-browser -port=8080 -base-port=3001
+# Run the orchestrator (default: min=2 workers, max=10)
+run min="2" max="20": build
+    ./steel-orchestrator -min-workers={{min}} -max-workers={{max}} -binary=./steel-browser -port=8080
 
 # Run orchestrator with race detector for debugging
-run-race workers="10":
-    cd orchestrator && go run -race . -workers={{workers}} -binary=../steel-browser -port=8080 -base-port=3001
+run-race min="2" max="10":
+    cd orchestrator && go run -race . -min-workers={{min}} -max-workers={{max}} -binary=../steel-browser -port=8080
 
 # Vet and check Go code
 check:
@@ -50,9 +50,9 @@ kill:
     -kill $(lsof -t -i:8080 -i:3001 -i:3002 -i:3003 -i:3004 -i:3005 -i:3006 -i:3007 -i:3008 -i:3009 -i:3010) 2>/dev/null; true
 
 # Kill, rebuild, and run everything fresh
-fresh workers="10": kill build
+fresh min="2" max="20": kill build
     sleep 1
-    ./steel-orchestrator -workers={{workers}} -binary=./steel-browser -port=8080 -base-port=3001
+    ./steel-orchestrator -min-workers={{min}} -max-workers={{max}} -binary=./steel-browser -port=8080
 
 # ─── Quick Checks ──────────────────────────────────────────────
 

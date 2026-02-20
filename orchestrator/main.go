@@ -16,17 +16,17 @@ import (
 )
 
 func main() {
-	workers := flag.Int("workers", 5, "number of worker processes to spawn")
+	minWorkers := flag.Int("min-workers", 2, "minimum (starting) number of worker processes")
+	maxWorkers := flag.Int("max-workers", 10, "maximum number of worker processes (auto-scaling ceiling)")
 	port := flag.Int("port", 8080, "orchestrator listen port")
 	binary := flag.String("binary", "./steel-browser", "path to the steel-browser binary")
-	basePort := flag.Int("base-port", 3001, "starting port for worker processes")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Printf("Starting orchestrator: workers=%d, port=%d, binary=%s", *workers, *port, *binary)
+	log.Printf("Starting orchestrator: min-workers=%d, max-workers=%d, port=%d, binary=%s", *minWorkers, *maxWorkers, *port, *binary)
 
 	// Create pool
-	pool, err := NewPool(*workers, *binary, *basePort)
+	pool, err := NewPool(*minWorkers, *maxWorkers, *binary)
 	if err != nil {
 		log.Fatalf("Failed to create worker pool: %v", err)
 	}
@@ -37,14 +37,14 @@ func main() {
 		log.Fatalf("Failed to create session manager: %v", err)
 	}
 
-	// setting up callback for worker crashes
+	// Wire crash handler for both initial and future scaled-up workers.
+	// pool.CrashHandler is picked up by addWorker(); apply it to initial workers too.
+	pool.CrashHandler = func(sessionID string) {
+		log.Printf("[session] removing stale session %s (worker crashed)", sessionID)
+		sessions.Remove(sessionID)
+	}
 	for _, w := range pool.Workers() {
-		w := w // capture loop variable
-		// passed through dep injection to decouple pool and sessionManager
-		w.OnCrash = func(sessionID string) {
-			log.Printf("[main] cleaning up stale session %s after worker %d crash", sessionID, w.ID)
-			sessions.Remove(sessionID)
-		}
+		w.OnCrash = pool.CrashHandler
 	}
 
 	// Wire up HTTP handlers
@@ -86,6 +86,28 @@ func main() {
 		handleStatus(w, pool, sessions)
 	})
 
+	// Debug endpoint — kills the worker holding the given session (for testing only)
+	mux.HandleFunc("/debug/crash-worker", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		worker, ok := pool.FindBySession(sessionID)
+		if !ok {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("[debug] killing worker %d holding session %s", worker.ID, sessionID)
+		worker.Kill()
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "worker killed")
+	})
+
 	// Graceful shutdown on SIGINT/SIGTERM
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -103,7 +125,7 @@ func main() {
 	}
 }
 
-const maxCreateRetries = 2
+const maxCreateRetries = 3
 
 // handleCreateSession handles POST /sessions
 // Retries with a new worker if the first one fails (EOF, crash, etc.)
@@ -116,13 +138,14 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, pool *Pool, ses
 	}
 	defer r.Body.Close()
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
 	var lastErr error
 	for attempt := 0; attempt < maxCreateRetries; attempt++ {
 		worker, err := pool.Acquire(ctx)
 		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to acquire worker: %v", err), http.StatusServiceUnavailable)
 			http.Error(w, "no workers available (queue timeout)", http.StatusServiceUnavailable)
 			return
 		}
@@ -225,8 +248,12 @@ func handleStatus(w http.ResponseWriter, pool *Pool, sessions *SessionManager) {
 	}
 
 	status := map[string]interface{}{
-		"active_sessions": sessions.Count(),
-		"workers":         workerStatus,
+		"active_sessions":   sessions.Count(),
+		"worker_count":      len(workers),
+		"available_workers": pool.QueueDepth(),
+		"min_workers":       pool.Min(),
+		"max_workers":       pool.Max(),
+		"workers":           workerStatus,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
