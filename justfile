@@ -37,23 +37,6 @@ build-tester-release:
 test url="http://localhost:8080":
     cd tester && cargo run -- --url {{url}}
 
-# ─── Benchmarks (k6) ───────────────────────────────────────────
-
-# Run k6 load test
-bench:
-    k6 run bench/bench.js
-
-# ─── Full Stack ─────────────────────────────────────────────────
-
-# Kill anything on the dev ports (8080, 3001-3005)
-kill:
-    -kill $(lsof -t -i:8080 -i:3001 -i:3002 -i:3003 -i:3004 -i:3005 -i:3006 -i:3007 -i:3008 -i:3009 -i:3010) 2>/dev/null; true
-
-# Kill, rebuild, and run everything fresh
-fresh min="2" max="20": kill build
-    sleep 1
-    ./steel-orchestrator -min-workers={{min}} -max-workers={{max}} -binary=./steel-browser -port=8080
-
 # ─── Quick Checks ──────────────────────────────────────────────
 
 # Quick health check
